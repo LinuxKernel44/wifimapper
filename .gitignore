@@ -1,15 +1,77 @@
+# =========================
+# Android Studio
+# =========================
+.idea/
 *.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
+*.iws
+*.ipr
+out/
+
+# =========================
+# Gradle
+# =========================
+.gradle/
+build/
+*/build/
+
+# Gradle Wrapper cache
+.gradle-cache/
+
+# Local configuration
 local.properties
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Android build outputs
+# =========================
+*.apk
+*.aab
+*.ap_
+
+# =========================
+# Navigation / generated
+# =========================
+.navigation/
+
+# =========================
+# Kotlin / Java compile
+# =========================
+*.class
+
+# =========================
+# Firebase / Google Services
+# =========================
+google-services.json
+
+# =========================
+# Secrets / keys (IMPORTANT pour toi)
+# =========================
+*.keystore
+*.jks
+*.pem
+*.pub
+linuxkernel44
+linuxkernel44.pub
+
+# =========================
+# Android Studio captures / previews
+# =========================
+captures/
+*.hprof
+
+# =========================
+# Room / Room DB debug
+# =========================
+*.db
+*.db-journal
+*.sqlite
