@@ -39,6 +39,8 @@ public class HeatmapOverlay extends Overlay {
     @Override
     public void draw(Canvas c, MapView mapView, boolean shadow) {
 
+        if (shadow) return;
+
         for (Map.Entry<String, Integer> e : grid.entrySet()) {
 
             int count = e.getValue();
@@ -52,20 +54,25 @@ public class HeatmapOverlay extends Overlay {
 
             paint.setColor(color);
 
-            // dessin simplifié (pixel grid style)
             float size = 25f;
 
-            c.drawRect(
-                    (float)(Math.random() * c.getWidth()),
-                    (float)(Math.random() * c.getHeight()),
-                    (float)(Math.random() * c.getWidth() + size),
-                    (float)(Math.random() * c.getHeight() + size),
-                    paint
-            );
+            // version FIXE (sinon ça "saute")
+            float x = (float) (hash(e.getKey()) % c.getWidth());
+            float y = (float) ((hash(e.getKey()) / 13) % c.getHeight());
+
+            c.drawRect(x, y, x + size, y + size, paint);
         }
+    }
+
+    private int hash(String s) {
+        return s.hashCode();
     }
 
     public void setCellSize(double size) {
         this.cellSize = size;
+    }
+
+    public void clear() {
+        grid.clear();
     }
 }

@@ -10,6 +10,9 @@ import org.osmdroid.util.GeoPoint;
 import org.osmdroid.views.MapView;
 import org.osmdroid.views.overlay.Marker;
 import org.osmdroid.views.overlay.Polygon;
+import org.osmdroid.views.overlay.Marker;
+import android.graphics.drawable.Drawable;
+import androidx.core.content.ContextCompat;
 
 import com.google.android.gms.location.*;
 
@@ -150,8 +153,11 @@ public class MapController {
 
         mapView.getOverlays().clear();
 
-        mapView.getOverlays().addAll(circleLayer); // dessous
-        mapView.getOverlays().addAll(markerLayer); // dessus
+        // 1. fond (heatmap + circles)
+        mapView.getOverlays().addAll(circleLayer);
+
+        // 2. marqueurs AP
+        mapView.getOverlays().addAll(markerLayer);
 
         mapView.invalidate();
     }

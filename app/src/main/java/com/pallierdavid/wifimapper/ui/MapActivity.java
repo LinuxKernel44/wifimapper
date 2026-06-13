@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.graphics.drawable.Drawable;
 import android.location.Location;
 import android.net.Uri;
 import android.net.wifi.ScanResult;
@@ -16,6 +17,7 @@ import android.os.PowerManager;
 import android.provider.Settings;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.hardware.SensorManager;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
@@ -27,6 +29,7 @@ import com.google.android.gms.location.*;
 import com.pallierdavid.wifimapper.data.AccessPoint;
 import com.pallierdavid.wifimapper.data.AccessPointDao;
 import com.pallierdavid.wifimapper.data.AppDatabase;
+import com.pallierdavid.wifimapper.data.GpsTrackPoint;
 import com.pallierdavid.wifimapper.data.Observation;
 import com.pallierdavid.wifimapper.map.HeatmapOverlay;
 import com.pallierdavid.wifimapper.map.MapController;
@@ -35,7 +38,10 @@ import org.osmdroid.config.Configuration;
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
 import org.osmdroid.util.GeoPoint;
 import org.osmdroid.views.MapView;
+import org.osmdroid.views.overlay.Marker;
+import org.osmdroid.views.overlay.Polyline;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -65,6 +71,13 @@ public class MapActivity extends AppCompatActivity {
     private Button heatBtn;
 
     private boolean followMe = false;
+
+    private Marker userLocationMarker;
+    private float lastBearing = 0f;
+    private Polyline gpsTrackLine;
+    private final ArrayList<GeoPoint> gpsTrackPoints = new ArrayList<>();
+    private long currentTripId = -1;
+    private boolean trackingEnabled = false;
 
     private AppDatabase db;
     private final ExecutorService dbExecutor = Executors.newSingleThreadExecutor();
@@ -137,9 +150,28 @@ public class MapActivity extends AppCompatActivity {
             }
         });
 
+        // 🔥 HEATMAP TOGGLE FIX
         heatBtn.setOnClickListener(v -> {
+
             heatmapEnabled = !heatmapEnabled;
             heatBtn.setText(heatmapEnabled ? "HEATMAP ON" : "HEATMAP OFF");
+
+            if (heatmapEnabled) {
+
+                if (!mapView.getOverlays().contains(heatmapOverlay)) {
+                    mapView.getOverlays().add(heatmapOverlay);
+                }
+
+            } else {
+
+                // 1. enlever de la map
+                mapView.getOverlays().remove(heatmapOverlay);
+
+                // 2. vider les données (IMPORTANT)
+                clearHeatmap();
+            }
+
+            mapView.invalidate();
         });
 
         LinearLayout root = new LinearLayout(this);
@@ -152,18 +184,49 @@ public class MapActivity extends AppCompatActivity {
                         1f
                 );
 
+        Button clearTrackBtn = new Button(this);
+        clearTrackBtn.setText("CLEAR TRACK");
+
+        clearTrackBtn.setOnClickListener(v -> {
+            gpsTrackPoints.clear();
+            gpsTrackLine.setPoints(new ArrayList<>());
+            mapView.invalidate();
+        });
+
+        Button trackBtn = new Button(this);
+        trackBtn.setText("TRACK OFF");
+
+        trackBtn.setOnClickListener(v -> {
+
+            trackingEnabled = !trackingEnabled;
+
+            if (trackingEnabled) {
+                startNewTrip();
+                trackBtn.setText("TRACK ON");
+            } else {
+                stopTrip();
+                trackBtn.setText("TRACK OFF");
+            }
+        });
+
         root.addView(homeBtn);
         root.addView(followBtn);
         root.addView(scanBtn);
         root.addView(heatBtn);
+        root.addView(clearTrackBtn);
+        root.addView(trackBtn);
         root.addView(mapView, mapParams);
 
         setContentView(root);
 
         requestLocationPermission();
 
+        // ❌ IMPORTANT : NE PLUS L'AJOUTER ICI (sinon toujours ON)
         heatmapOverlay = new HeatmapOverlay();
-        mapView.getOverlays().add(heatmapOverlay);
+
+        gpsTrackLine = new Polyline();
+        gpsTrackLine.setWidth(8f);
+        mapView.getOverlays().add(gpsTrackLine);
 
         requestBatteryOptimizationExemption();
     }
@@ -188,9 +251,33 @@ public class MapActivity extends AppCompatActivity {
         }
     }
 
+    private void clearHeatmap() {
+        if (heatmapOverlay != null) {
+            heatmapOverlay.clear(); // ⚠️ si tu as une liste interne
+        }
+    }
+
+    // ===================== 🔥 FIX Z-ORDER GLOBAL =====================
+    private void forceOverlayOrder() {
+
+        mapView.getOverlays().remove(gpsTrackLine);
+
+        // ordre IMPORTANT :
+        // 1 heatmap
+        // 2 AP markers (gérés ailleurs)
+        // 3 GPS track LINE (au-dessus)
+        // 4 USER marker (TOUT AU-DESSUS)
+
+        mapView.getOverlays().add(gpsTrackLine);
+
+        if (userLocationMarker != null) {
+            mapView.getOverlays().remove(userLocationMarker);
+            mapView.getOverlays().add(userLocationMarker);
+        }
+    }
+
     // ---------------- LOCATION ----------------
     private void goToMyLocationOnce() {
-
         if (!hasPermission()) return;
 
         fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
@@ -200,6 +287,14 @@ public class MapActivity extends AppCompatActivity {
                         controller.centerOnUser(location.getLatitude(), location.getLongitude());
                         mapView.getController().setZoom(18.5);
                     }
+
+                    initUserMarker();
+
+                    GeoPoint userPoint = new GeoPoint(location.getLatitude(), location.getLongitude());
+                    userLocationMarker.setPosition(userPoint);
+
+                    forceOverlayOrder();
+                    mapView.invalidate();
                 });
     }
 
@@ -213,6 +308,7 @@ public class MapActivity extends AppCompatActivity {
         ).setMinUpdateIntervalMillis(1000).build();
 
         locationCallback = new LocationCallback() {
+
             @Override
             public void onLocationResult(@NonNull LocationResult result) {
 
@@ -223,12 +319,23 @@ public class MapActivity extends AppCompatActivity {
 
                 lastLocation = loc;
 
-                GeoPoint point = new GeoPoint(loc.getLatitude(), loc.getLongitude());
+                GeoPoint newPoint = new GeoPoint(loc.getLatitude(), loc.getLongitude());
+
+                if (userLocationMarker == null) initUserMarker();
+
+                animateMarkerTo(userLocationMarker, loc.getLatitude(), loc.getLongitude());
+
+                gpsTrackPoints.add(newPoint);
+                gpsTrackLine.setPoints(new ArrayList<>(gpsTrackPoints));
+
+                forceOverlayOrder();
 
                 mapView.getController().setZoom(19.5);
-                mapView.getController().animateTo(point);
+                mapView.getController().animateTo(newPoint);
 
                 controller.centerOnUser(loc.getLatitude(), loc.getLongitude());
+
+                mapView.invalidate();
             }
         };
 
@@ -240,12 +347,9 @@ public class MapActivity extends AppCompatActivity {
     }
 
     private void stopFollowMode() {
-
         if (locationCallback != null) {
             fusedLocationClient.removeLocationUpdates(locationCallback);
         }
-
-        mapView.getController().setZoom(18.0);
     }
 
     // ---------------- WIFI ----------------
@@ -402,6 +506,77 @@ public class MapActivity extends AppCompatActivity {
         );
 
         return result[0];
+    }
+
+    private void initUserMarker() {
+
+        if (userLocationMarker != null) return;
+
+        userLocationMarker = new Marker(mapView);
+        userLocationMarker.setTitle("You");
+
+        Drawable icon = ContextCompat.getDrawable(this, android.R.drawable.arrow_up_float);
+        userLocationMarker.setIcon(icon);
+
+        userLocationMarker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER);
+
+        mapView.getOverlays().add(userLocationMarker);
+
+        forceOverlayOrder();
+    }
+
+    private void animateMarkerTo(final Marker marker,
+                                 final double toLat,
+                                 final double toLon) {
+
+        final GeoPoint start = marker.getPosition();
+        if (start == null) return;
+
+        final double fromLat = start.getLatitude();
+        final double fromLon = start.getLongitude();
+
+        final long duration = 500;
+        final long startTime = System.currentTimeMillis();
+
+        Handler handler = new Handler();
+
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+
+                float t = (System.currentTimeMillis() - startTime) / (float) duration;
+                if (t > 1f) t = 1f;
+
+                double lat = fromLat + (toLat - fromLat) * t;
+                double lon = fromLon + (toLon - fromLon) * t;
+
+                marker.setPosition(new GeoPoint(lat, lon));
+
+                forceOverlayOrder();
+                mapView.invalidate();
+
+                if (t < 1f) handler.postDelayed(this, 16);
+            }
+        });
+    }
+
+    private float computeBearing(double lat1, double lon1,
+                                 double lat2, double lon2) {
+
+        float[] result = new float[2];
+
+        Location.distanceBetween(lat1, lon1, lat2, lon2, result);
+
+        return result[1]; // ✔ bearing correct
+    }
+
+    private void startNewTrip() {
+        currentTripId = System.currentTimeMillis();
+        trackingEnabled = true;
+    }
+
+    private void stopTrip() {
+        trackingEnabled = false;
     }
 
     // ---------------- LIFECYCLE ----------------
