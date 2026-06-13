@@ -1,0 +1,57 @@
+plugins {
+    alias(libs.plugins.android.application)
+}
+
+android {
+    namespace 'com.pallierdavid.wifimapper'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.pallierdavid.wifimapper"
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+
+    implementation libs.activity.ktx
+    implementation libs.appcompat
+    implementation libs.constraintlayout
+    implementation libs.material
+
+    // ROOM
+    implementation "androidx.room:room-runtime:2.6.1"
+    annotationProcessor "androidx.room:room-compiler:2.6.1"
+
+    // LIFECYCLE
+    implementation "androidx.lifecycle:lifecycle-runtime:2.8.4"
+
+
+    // PERMISSIONS / ACTIVITY
+    implementation "androidx.activity:activity:1.9.2"
+
+    implementation "com.google.android.gms:play-services-location:21.3.0"
+
+
+    implementation 'org.osmdroid:osmdroid-android:6.1.18'
+
+    testImplementation libs.junit
+    androidTestImplementation libs.espresso.core
+    androidTestImplementation libs.ext.junit
+}
