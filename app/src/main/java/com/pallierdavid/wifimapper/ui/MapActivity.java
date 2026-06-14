@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.graphics.drawable.Drawable;
 import android.location.Location;
 import android.net.Uri;
@@ -15,9 +16,14 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.view.View;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.hardware.SensorManager;
+import android.view.Gravity;
+import android.widget.ImageButton;
+import android.widget.PopupMenu;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
@@ -86,11 +92,13 @@ public class MapActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        setContentView(R.layout.activity_map);
+
         Configuration.getInstance().setUserAgentValue(getPackageName());
 
-        db = AppDatabase.getInstance(this);
+        mapView = findViewById(R.id.map);
+        ImageButton settingsBtn = findViewById(R.id.settingsBtn);
 
-        mapView = new MapView(this);
         mapView.setTileSource(TileSourceFactory.MAPNIK);
         mapView.setMultiTouchControls(true);
         mapView.setBuiltInZoomControls(true);
@@ -100,135 +108,138 @@ public class MapActivity extends AppCompatActivity {
         controller.loadAccessPoints();
 
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
-
         wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
 
-        homeBtn = new Button(this);
-        homeBtn.setText("HOME");
-
-        followBtn = new Button(this);
-        followBtn.setText("FOLLOW: OFF");
-
-        scanBtn = new Button(this);
-        scanBtn.setText("WIFI SCAN OFF");
-
-        heatBtn = new Button(this);
-        heatBtn.setText("HEATMAP OFF");
-
-        homeBtn.setOnClickListener(v -> goToMyLocationOnce());
-
-        followBtn.setOnClickListener(v -> {
-            followMe = !followMe;
-            followBtn.setText(followMe ? "FOLLOW: ON" : "FOLLOW: OFF");
-
-            if (followMe) startFollowMode();
-            else stopFollowMode();
-        });
-
-        scanBtn.setOnClickListener(v -> {
-            wifiMappingMode = !wifiMappingMode;
-
-            if (wifiMappingMode) {
-                scanBtn.setText("WIFI SCAN ON");
-
-                if (!receiverRegistered) {
-                    registerReceiver(wifiReceiver,
-                            new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
-                    receiverRegistered = true;
-                }
-
-                startWifiScanning();
-
-            } else {
-                scanBtn.setText("WIFI SCAN OFF");
-                stopWifiScanning();
-
-                if (receiverRegistered) {
-                    unregisterReceiver(wifiReceiver);
-                    receiverRegistered = false;
-                }
-            }
-        });
-
-        // 🔥 HEATMAP TOGGLE FIX
-        heatBtn.setOnClickListener(v -> {
-
-            heatmapEnabled = !heatmapEnabled;
-            heatBtn.setText(heatmapEnabled ? "HEATMAP ON" : "HEATMAP OFF");
-
-            if (heatmapEnabled) {
-
-                if (!mapView.getOverlays().contains(heatmapOverlay)) {
-                    mapView.getOverlays().add(heatmapOverlay);
-                }
-
-            } else {
-
-                // 1. enlever de la map
-                mapView.getOverlays().remove(heatmapOverlay);
-
-                // 2. vider les données (IMPORTANT)
-                clearHeatmap();
-            }
-
-            mapView.invalidate();
-        });
-
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-
-        LinearLayout.LayoutParams mapParams =
-                new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        0,
-                        1f
-                );
-
-        Button clearTrackBtn = new Button(this);
-        clearTrackBtn.setText("CLEAR TRACK");
-
-        clearTrackBtn.setOnClickListener(v -> {
-            gpsTrackPoints.clear();
-            gpsTrackLine.setPoints(new ArrayList<>());
-            mapView.invalidate();
-        });
-
-        Button trackBtn = new Button(this);
-        trackBtn.setText("TRACK OFF");
-
-        trackBtn.setOnClickListener(v -> {
-
-            trackingEnabled = !trackingEnabled;
-
-            if (trackingEnabled) {
-                startNewTrip();
-                trackBtn.setText("TRACK ON");
-            } else {
-                stopTrip();
-                trackBtn.setText("TRACK OFF");
-            }
-        });
-
-        root.addView(homeBtn);
-        root.addView(followBtn);
-        root.addView(scanBtn);
-        root.addView(heatBtn);
-        root.addView(clearTrackBtn);
-        root.addView(trackBtn);
-        root.addView(mapView, mapParams);
-
-        setContentView(root);
-
-        requestLocationPermission();
-
-        // ❌ IMPORTANT : NE PLUS L'AJOUTER ICI (sinon toujours ON)
         heatmapOverlay = new HeatmapOverlay();
+        heatmapEnabled = false;
 
         gpsTrackLine = new Polyline();
         gpsTrackLine.setWidth(8f);
         mapView.getOverlays().add(gpsTrackLine);
 
+        settingsBtn.setOnClickListener(v -> showBottomSheet());
+
+        requestLocationPermission();
         requestBatteryOptimizationExemption();
+    }
+
+    private void showBottomSheet() {
+
+        com.google.android.material.bottomsheet.BottomSheetDialog sheet =
+                new com.google.android.material.bottomsheet.BottomSheetDialog(this);
+
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(40, 40, 40, 40);
+
+        // ================= HOME =================
+        Button home = new Button(this);
+        home.setText("📍 Home");
+        home.setOnClickListener(v -> {
+            goToMyLocationOnce();
+            sheet.dismiss();
+        });
+
+        // ================= FOLLOW =================
+        Button follow = new Button(this);
+        follow.setText(followMe ? "🧭 Follow: ON" : "🧭 Follow: OFF");
+        follow.setOnClickListener(v -> {
+            followMe = !followMe;
+            if (followMe) startFollowMode();
+            else stopFollowMode();
+            sheet.dismiss();
+        });
+
+        // ================= WIFI =================
+        Button wifi = new Button(this);
+        wifi.setText(wifiMappingMode ? "📡 WiFi: ON" : "📡 WiFi: OFF");
+        wifi.setOnClickListener(v -> {
+            wifiMappingMode = !wifiMappingMode;
+
+            if (wifiMappingMode) {
+                if (!receiverRegistered) {
+                    registerReceiver(wifiReceiver,
+                            new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
+                    receiverRegistered = true;
+                }
+                startWifiScanning();
+            } else {
+                stopWifiScanning();
+                if (receiverRegistered) {
+                    unregisterReceiver(wifiReceiver);
+                    receiverRegistered = false;
+                }
+            }
+
+            sheet.dismiss();
+        });
+
+        // ================= HEATMAP =================
+        Button heat = new Button(this);
+        heat.setText(heatmapEnabled ? "🔥 Heatmap: ON" : "🔥 Heatmap: OFF");
+        heat.setOnClickListener(v -> {
+
+            heatmapEnabled = !heatmapEnabled;
+
+            if (heatmapEnabled) {
+                if (!mapView.getOverlays().contains(heatmapOverlay)) {
+                    mapView.getOverlays().add(heatmapOverlay);
+                }
+            } else {
+                mapView.getOverlays().remove(heatmapOverlay);
+                heatmapOverlay.clear();
+            }
+
+            mapView.invalidate();
+            sheet.dismiss();
+        });
+
+        // ================= CLEAR TRACK =================
+        Button clearTrack = new Button(this);
+        clearTrack.setText("🧹 Clear track");
+        clearTrack.setOnClickListener(v -> {
+            gpsTrackPoints.clear();
+            gpsTrackLine.setPoints(new ArrayList<>());
+            mapView.invalidate();
+            sheet.dismiss();
+        });
+
+        // ================= TRACK =================
+        Button track = new Button(this);
+        track.setText(trackingEnabled ? "📍 Track: ON" : "📍 Track: OFF");
+        track.setOnClickListener(v -> {
+
+            trackingEnabled = !trackingEnabled;
+
+            if (trackingEnabled) startNewTrip();
+            else stopTrip();
+
+            sheet.dismiss();
+        });
+
+        // ================= ADD ALL =================
+        layout.addView(home);
+        layout.addView(follow);
+        layout.addView(wifi);
+        layout.addView(heat);
+        layout.addView(clearTrack);
+        layout.addView(track);
+
+        sheet.setContentView(layout);
+        sheet.show();
+
+        View content = sheet.findViewById(com.google.android.material.R.id.design_bottom_sheet);
+
+        if (content != null) {
+
+            android.view.animation.Animation anim =
+                    android.view.animation.AnimationUtils.loadAnimation(
+                            this,
+                            R.anim.menu_open
+                    );
+
+            content.startAnimation(anim);
+        }
     }
 
     // ---------------- BATTERY OPTIMIZATION ----------------
@@ -253,7 +264,12 @@ public class MapActivity extends AppCompatActivity {
 
     private void clearHeatmap() {
         if (heatmapOverlay != null) {
-            heatmapOverlay.clear(); // ⚠️ si tu as une liste interne
+            heatmapOverlay.clear();
+        }
+
+        if (mapView != null) {
+            mapView.getOverlays().remove(heatmapOverlay);
+            mapView.invalidate();
         }
     }
 
@@ -262,16 +278,13 @@ public class MapActivity extends AppCompatActivity {
 
         mapView.getOverlays().remove(gpsTrackLine);
 
-        // ordre IMPORTANT :
-        // 1 heatmap
-        // 2 AP markers (gérés ailleurs)
-        // 3 GPS track LINE (au-dessus)
-        // 4 USER marker (TOUT AU-DESSUS)
+        if (userLocationMarker != null) {
+            mapView.getOverlays().remove(userLocationMarker);
+        }
 
         mapView.getOverlays().add(gpsTrackLine);
 
         if (userLocationMarker != null) {
-            mapView.getOverlays().remove(userLocationMarker);
             mapView.getOverlays().add(userLocationMarker);
         }
     }
@@ -458,7 +471,7 @@ public class MapActivity extends AppCompatActivity {
                 );
             });
 
-            if (heatmapEnabled && lastLocation != null) {
+            if (heatmapEnabled && lastLocation != null && mapView.getOverlays().contains(heatmapOverlay)) {
                 heatmapOverlay.addPoint(lat, lon);
             }
         }
