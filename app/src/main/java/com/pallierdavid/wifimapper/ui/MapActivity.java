@@ -39,6 +39,7 @@ import com.pallierdavid.wifimapper.data.GpsTrackPoint;
 import com.pallierdavid.wifimapper.data.Observation;
 import com.pallierdavid.wifimapper.map.HeatmapOverlay;
 import com.pallierdavid.wifimapper.map.MapController;
+import com.pallierdavid.wifimapper.R;
 
 import org.osmdroid.config.Configuration;
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
