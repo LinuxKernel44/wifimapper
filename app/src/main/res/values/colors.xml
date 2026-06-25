@@ -2,4 +2,33 @@
 <resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- Primary -->
+    <color name="primary">#1565C0</color>
+    <color name="primary_dark">#003C8F</color>
+    <color name="primary_light">#5E92F3</color>
+    <color name="on_primary">#FFFFFF</color>
+
+    <!-- Accent -->
+    <color name="accent">#00BCD4</color>
+
+    <!-- Backgrounds -->
+    <color name="background">#F0F4F8</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="divider">#E0E0E0</color>
+
+    <!-- Text -->
+    <color name="on_surface">#212121</color>
+    <color name="on_surface_secondary">#757575</color>
+
+    <!-- Status -->
+    <color name="status_scanning">#43A047</color>
+    <color name="status_stopped">#E53935</color>
+
+    <!-- Signal strength -->
+    <color name="rssi_excellent">#43A047</color>
+    <color name="rssi_good">#7CB342</color>
+    <color name="rssi_fair">#FFB300</color>
+    <color name="rssi_poor">#F4511E</color>
+    <color name="rssi_bad">#E53935</color>
 </resources>

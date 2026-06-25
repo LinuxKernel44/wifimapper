@@ -21,4 +21,7 @@ public interface ObservationDao {
 
     @Query("SELECT * FROM observations WHERE bssid = :bssid ORDER BY timestamp DESC")
     List<Observation> getByBssid(String bssid);
+
+    @Query("DELETE FROM observations")
+    void deleteAll();
 }

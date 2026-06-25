@@ -1,3 +1,71 @@
 <resources>
-    <string name="app_name">WiFiMapper</string>
+    <string name="app_name">WiFi Mapper</string>
+
+    <!-- Buttons -->
+    <string name="btn_start">▶ Start Scan</string>
+    <string name="btn_stop">■ Stop Scan</string>
+    <string name="btn_map">🗺 Map</string>
+    <string name="btn_debug">🐛 Debug</string>
+    <string name="btn_settings">⚙ Settings</string>
+    <string name="btn_save_settings">Save Settings</string>
+    <string name="btn_reset_settings">Reset to Defaults</string>
+    <string name="btn_export_csv">📤 Export CSV</string>
+    <string name="btn_clear_db">🗑 Clear Database</string>
+
+    <!-- Status -->
+    <string name="status_scanning">🔵 SCANNING…</string>
+    <string name="status_stopped">🔴 STOPPED</string>
+
+    <!-- Labels -->
+    <string name="label_live_log">Live WiFi Log</string>
+    <string name="label_ap_count">%1$d APs</string>
+    <string name="log_initial">Waiting for scan…\n</string>
+
+    <!-- Settings sections -->
+    <string name="title_settings">Settings</string>
+    <string name="settings_section_scan">SCAN</string>
+    <string name="settings_section_dedup">DEDUPLICATION</string>
+    <string name="settings_section_filter">SIGNAL FILTER</string>
+    <string name="settings_scan_interval">Scan interval</string>
+    <string name="settings_dedup_distance">Min move distance</string>
+    <string name="settings_dedup_time">Min time between writes</string>
+    <string name="settings_rssi_min">Minimum RSSI threshold</string>
+    <string name="settings_restart_note">Restart the scan service for changes to take effect.</string>
+    <string name="settings_saved">Settings saved.</string>
+    <string name="settings_reset">Settings reset to defaults.</string>
+
+    <!-- Map bottom sheet -->
+    <string name="sheet_home">📍 Home</string>
+    <string name="sheet_follow_on">🧭 Follow: ON</string>
+    <string name="sheet_follow_off">🧭 Follow: OFF</string>
+    <string name="sheet_wifi_on">📡 WiFi: ON</string>
+    <string name="sheet_wifi_off">📡 WiFi: OFF</string>
+    <string name="sheet_heat_on">🔥 Heatmap: ON</string>
+    <string name="sheet_heat_off">🔥 Heatmap: OFF</string>
+    <string name="sheet_track_on">📍 Track: ON</string>
+    <string name="sheet_track_off">📍 Track: OFF</string>
+    <string name="sheet_clear_track">🧹 Clear Track</string>
+    <string name="sheet_settings">⚙ Settings</string>
+    <string name="sheet_debug">🐛 Debug</string>
+    <string name="sheet_export">📤 Export CSV</string>
+    <string name="sheet_clear_db">🗑 Clear Database</string>
+
+    <!-- Notifications -->
+    <string name="notif_title">WiFi Mapper</string>
+    <string name="notif_scanning">Scanning… %1$d APs found</string>
+
+    <!-- Debug -->
+    <string name="debug_title">Debug — Live Data</string>
+    <string name="debug_tab_obs">Observations</string>
+    <string name="debug_tab_aps">Access Points</string>
+
+    <!-- Dialogs -->
+    <string name="dialog_clear_db_title">Clear Database?</string>
+    <string name="dialog_clear_db_msg">This will permanently delete all WiFi observations and access point data.</string>
+    <string name="dialog_confirm">Delete</string>
+    <string name="dialog_cancel">Cancel</string>
+
+    <!-- Export -->
+    <string name="export_success">Exported to: %1$s</string>
+    <string name="export_error">Export failed: %1$s</string>
 </resources>

@@ -5,6 +5,7 @@ import android.graphics.Color;
 
 import com.pallierdavid.wifimapper.data.AccessPoint;
 import com.pallierdavid.wifimapper.data.AppDatabase;
+import com.pallierdavid.wifimapper.util.ManufacturerLookup;
 
 import org.osmdroid.util.GeoPoint;
 import org.osmdroid.views.MapView;
@@ -25,13 +26,6 @@ public class MapController {
     private final Map<String, Marker> markerMap = new HashMap<>();
     private final Map<String, Polygon> circleMap = new HashMap<>();
 
-    // FIX: avant, chaque mise à jour d'AP appelait refreshLayers() qui faisait
-    // mapView.getOverlays().clear() puis rajoutait TOUT (markers + cercles). Ça
-    // effaçait au passage la heatmap, la trace GPS et le marqueur utilisateur gérés
-    // par MapActivity (d'où le besoin de forceOverlayOrder() un peu partout en hack).
-    // Avec un FolderOverlay par catégorie, ajouté UNE SEULE FOIS à la carte, on peut
-    // ajouter/retirer des markers ou des cercles individuellement sans jamais toucher
-    // à la liste globale d'overlays de la MapView.
     private final FolderOverlay circlesFolder = new FolderOverlay();
     private final FolderOverlay markersFolder = new FolderOverlay();
 
@@ -41,48 +35,34 @@ public class MapController {
         this.db = AppDatabase.getInstance(context);
     }
 
-    // ---------------- INIT MAP ----------------
     public void init() {
         mapView.setMultiTouchControls(true);
         mapView.getController().setZoom(18.0);
         mapView.getController().setCenter(new GeoPoint(44.054, 3.984));
 
         mapView.getOverlays().clear();
-
         markerMap.clear();
         circleMap.clear();
         circlesFolder.getItems().clear();
         markersFolder.getItems().clear();
 
-        // ordre d'ajout = ordre de dessin : cercles de couverture d'abord, marqueurs
-        // d'AP par dessus. Tout ce que MapActivity ajoute ENSUITE (trace GPS,
-        // marqueur utilisateur, heatmap) viendra naturellement au-dessus.
         mapView.getOverlays().add(circlesFolder);
         mapView.getOverlays().add(markersFolder);
     }
 
-    // ---------------- LOAD AP ----------------
     public void loadAccessPoints() {
-
         new Thread(() -> {
-
             List<AccessPoint> aps = db.accessPointDao().getAll();
-
             ((android.app.Activity) context).runOnUiThread(() -> {
-
                 for (AccessPoint ap : aps) {
                     addOrUpdateMarker(ap);
                 }
-
                 mapView.invalidate();
             });
-
         }).start();
     }
 
-    // ---------------- ADD / UPDATE MARKER ----------------
     public void addOrUpdateMarker(AccessPoint ap) {
-
         if (ap == null) return;
         if (ap.estimatedLatitude == 0 && ap.estimatedLongitude == 0) return;
 
@@ -91,70 +71,60 @@ public class MapController {
                 ap.displayLongitude != 0 ? ap.displayLongitude : ap.estimatedLongitude
         );
 
-        String title = ap.ssid != null ? ap.ssid : "Unknown SSID";
-        String bssid = ap.bssid != null ? ap.bssid : "Unknown BSSID";
+        String ssid = ap.ssid != null && !ap.ssid.isEmpty() ? ap.ssid : "(hidden)";
+        String bssid = ap.bssid != null ? ap.bssid : "Unknown";
+        String manufacturer = ap.manufacturer != null
+                ? ap.manufacturer
+                : ManufacturerLookup.lookupOrUnknown(ap.bssid);
 
-        String info =
-                "SSID: " + title +
-                        "\nBSSID: " + bssid +
-                        "\nRSSI: " + ap.averageRssi +
-                        "\nObs: " + ap.observationCount;
+        String band = bandLabel(ap.frequencyBand);
+        String rssiLabel = rssiQuality((int) ap.averageRssi);
+
+        String snippet =
+                "BSSID: " + bssid +
+                "\nMaker: " + manufacturer +
+                "\nBand: " + band +
+                "\nRSSI: " + (int) ap.averageRssi + " dBm  (" + rssiLabel + ")" +
+                "\nObs: " + ap.observationCount;
 
         Marker marker = markerMap.get(ap.bssid);
-
         if (marker == null) {
-
             marker = new Marker(mapView);
             marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM);
-
             marker.setOnMarkerClickListener((m, mv) -> {
                 m.showInfoWindow();
                 return true;
             });
-
             markerMap.put(ap.bssid, marker);
             markersFolder.getItems().add(marker);
         }
 
         marker.setPosition(point);
-        marker.setTitle(title);
-        marker.setSnippet(info);
+        marker.setTitle(ssid);
+        marker.setSnippet(snippet);
 
         drawCoverageCircle(ap, point);
-
-        // FIX: un simple invalidate() suffit, plus besoin de reconstruire toute la
-        // pile d'overlays à chaque AP.
         mapView.invalidate();
     }
 
-    // ---------------- RSSI COLOR ----------------
     private int getColorFromRssi(int rssi) {
-
-        if (rssi >= -50) return Color.argb(160, 0, 255, 0);
-        if (rssi >= -60) return Color.argb(160, 120, 255, 0);
-        if (rssi >= -70) return Color.argb(160, 255, 200, 0);
-        if (rssi >= -80) return Color.argb(160, 255, 120, 0);
-        return Color.argb(160, 255, 0, 0);
+        if (rssi >= -50) return Color.argb(160, 0, 200, 80);
+        if (rssi >= -60) return Color.argb(160, 120, 210, 0);
+        if (rssi >= -70) return Color.argb(160, 255, 190, 0);
+        if (rssi >= -80) return Color.argb(160, 255, 110, 0);
+        return Color.argb(160, 220, 30, 30);
     }
 
-    // ---------------- CIRCLE COVERAGE ----------------
     private void drawCoverageCircle(AccessPoint ap, GeoPoint center) {
-
         int color = getColorFromRssi((int) ap.averageRssi);
         double radiusMeters = Math.max(10, (100 - Math.abs(ap.averageRssi)) * 2);
 
-        // FIX: on ne retouche QUE le cercle de cet AP, plus la totalité des cercles
-        // existants (l'ancienne version recalculait les 40 points trigonométriques de
-        // TOUS les cercles connus à chaque AP traité - coût O(n²) sur un scan complet).
         Polygon old = circleMap.get(ap.bssid);
-        if (old != null) {
-            circlesFolder.getItems().remove(old);
-        }
+        if (old != null) circlesFolder.getItems().remove(old);
 
         Polygon circle = new Polygon(mapView);
         circle.setPoints(buildCircle(center, radiusMeters));
-
-        circle.setFillColor(adjustAlpha(color, 80));
+        circle.setFillColor(adjustAlpha(color, 70));
         circle.setStrokeColor(adjustAlpha(color, 180));
         circle.setStrokeWidth(2f);
         circle.setOnClickListener((p, mv, pos) -> false);
@@ -163,48 +133,46 @@ public class MapController {
         circlesFolder.getItems().add(circle);
     }
 
-    // ---------------- ALPHA ----------------
     private int adjustAlpha(int color, int alpha) {
         return (color & 0x00FFFFFF) | (alpha << 24);
     }
 
-    // ---------------- CIRCLE ----------------
     private List<GeoPoint> buildCircle(GeoPoint center, double radiusMeters) {
-
-        java.util.List<GeoPoint> points = new java.util.ArrayList<>();
-
+        List<GeoPoint> points = new java.util.ArrayList<>();
         int steps = 40;
-        double earthRadius = 6371000.0;
-
+        double earthRadius = 6_371_000.0;
         double lat = Math.toRadians(center.getLatitude());
         double lon = Math.toRadians(center.getLongitude());
-
         double angularDistance = radiusMeters / earthRadius;
 
         for (int i = 0; i <= steps; i++) {
-
             double bearing = 2 * Math.PI * i / steps;
-
             double lat2 = Math.asin(
                     Math.sin(lat) * Math.cos(angularDistance) +
-                            Math.cos(lat) * Math.sin(angularDistance) * Math.cos(bearing)
-            );
-
+                    Math.cos(lat) * Math.sin(angularDistance) * Math.cos(bearing));
             double lon2 = lon + Math.atan2(
                     Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(lat),
-                    Math.cos(angularDistance) - Math.sin(lat) * Math.sin(lat2)
-            );
-
-            points.add(new GeoPoint(
-                    Math.toDegrees(lat2),
-                    Math.toDegrees(lon2)
-            ));
+                    Math.cos(angularDistance) - Math.sin(lat) * Math.sin(lat2));
+            points.add(new GeoPoint(Math.toDegrees(lat2), Math.toDegrees(lon2)));
         }
-
         return points;
     }
 
-    // ---------------- UTIL ----------------
+    private static String bandLabel(int freq) {
+        if (freq <= 0) return "?";
+        if (freq < 3000) return "2.4 GHz";
+        if (freq < 6000) return "5 GHz";
+        return "6 GHz";
+    }
+
+    private static String rssiQuality(int rssi) {
+        if (rssi >= -50) return "Excellent";
+        if (rssi >= -60) return "Good";
+        if (rssi >= -70) return "Fair";
+        if (rssi >= -80) return "Poor";
+        return "Weak";
+    }
+
     public void refresh() {
         mapView.invalidate();
     }

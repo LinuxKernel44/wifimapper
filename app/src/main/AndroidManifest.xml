@@ -48,6 +48,10 @@
 
         <activity android:name=".ui.MapActivity" />
 
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:parentActivityName=".ui.MainActivity" />
+
         <service
             android:name=".service.WifiScanService"
             android:exported="false"

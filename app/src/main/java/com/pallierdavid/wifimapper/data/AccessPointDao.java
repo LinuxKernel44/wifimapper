@@ -21,4 +21,7 @@ public interface AccessPointDao {
 
     @Query("DELETE FROM access_points")
     void clear();
+
+    @Query("DELETE FROM access_points")
+    void deleteAll();
 }
