@@ -244,8 +244,10 @@ public class MapActivity extends AppCompatActivity {
     }
 
     private MaterialButton makeSheetButton(String text) {
-        MaterialButton btn = new MaterialButton(this,
-                null, com.google.android.material.R.attr.borderlessButtonStyle);
+        MaterialButton btn = new MaterialButton(
+                new android.view.ContextThemeWrapper(this,
+                        com.google.android.material.R.style.Widget_Material3_Button_TextButton),
+                null, 0);
         btn.setText(text);
         btn.setTextSize(15f);
         android.widget.LinearLayout.LayoutParams lp =

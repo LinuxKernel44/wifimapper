@@ -5,6 +5,7 @@ import android.content.*;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.os.*;
+import android.view.View;
 import android.widget.*;
 
 import androidx.activity.result.ActivityResultLauncher;
