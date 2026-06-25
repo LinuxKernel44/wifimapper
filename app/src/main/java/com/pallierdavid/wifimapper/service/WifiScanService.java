@@ -37,6 +37,14 @@ public class WifiScanService extends Service {
     public static final String ACTION_WIFI_LOG =
             "com.pallierdavid.wifimapper.WIFI_LOG";
 
+    // FIX: une nouvelle observation pour le même BSSID n'est écrite en base que si on
+    // s'est déplacé d'au moins ce seuil, ou si assez de temps s'est écoulé. Avant, une
+    // ligne Observation était insérée à CHAQUE scan (~ toutes les 12s) pour CHAQUE AP vu,
+    // même immobile : la base grossissait sans fin pour rien et la trilatération
+    // recalculait inutilement sur des points quasi identiques.
+    private static final double DEDUP_DISTANCE_METERS = 3.0;
+    private static final long DEDUP_TIME_MS = 30_000;
+
     private WifiManager wifiManager;
     private AppDatabase db;
 
@@ -51,7 +59,14 @@ public class WifiScanService extends Service {
 
     private int scanCounter = 0;
 
-    // 🔥 dernier scan results buffer (IMPORTANT)
+    // FIX: wake lock partiel pour éviter que le CPU ne s'endorme entre deux scans
+    // (Thread.sleep en boucle) quand l'écran est éteint / l'app en arrière-plan.
+    // Le foreground service seul ne garantit pas que les boucles de calcul continuent
+    // sous Doze sur tous les OEM.
+    private PowerManager.WakeLock wakeLock;
+    private static final long WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1000L; // 10 min, renouvelé en boucle
+
+    // dernier scan results buffer
     private volatile List<ScanResult> latestResults = new ArrayList<>();
 
     private final BroadcastReceiver scanReceiver = new BroadcastReceiver() {
@@ -96,17 +111,36 @@ public class WifiScanService extends Service {
         clusteringEngine = new WifiClusteringEngine(db);
         gpsTracker = new GpsTracker(getApplicationContext());
 
-        registerReceiver(scanReceiver,
-                new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
+        // FIX: requis sur Android 13+ (sinon SecurityException au registerReceiver, ce
+        // qui faisait planter le service au tout premier démarrage sur les téléphones
+        // récents). MapActivity avait déjà ce correctif, le service ne l'avait pas.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(scanReceiver,
+                    new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION),
+                    Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(scanReceiver,
+                    new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
+        }
 
         createNotificationChannel();
         startForegroundSafe();
+        acquireWakeLock();
 
         running = true;
 
         if (hasLocationPermission()) gpsTracker.start();
 
         startLoop();
+    }
+
+    private void acquireWakeLock() {
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (pm == null) return;
+
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WifiMapper::ScanWakeLock");
+        wakeLock.setReferenceCounted(false);
+        wakeLock.acquire(WAKE_LOCK_TIMEOUT_MS);
     }
 
     private boolean hasLocationPermission() {
@@ -140,7 +174,7 @@ public class WifiScanService extends Service {
         }
     }
 
-    // 🔥 LOOP = ONLY TRIGGER SCAN
+    // LOOP = ONLY TRIGGER SCAN
     private void startLoop() {
         new Thread(() -> {
             while (running) {
@@ -150,6 +184,11 @@ public class WifiScanService extends Service {
                         Thread.sleep(5000);
                         continue;
                     }
+
+                    // FIX: on renouvelle le wake lock à chaque itération plutôt que de
+                    // l'acquérir une seule fois sans limite (ce qui aurait pu masquer une
+                    // fuite si onDestroy() n'est jamais appelé proprement par l'OS).
+                    if (wakeLock != null) wakeLock.acquire(WAKE_LOCK_TIMEOUT_MS);
 
                     sendState("scanning");
 
@@ -171,17 +210,15 @@ public class WifiScanService extends Service {
         }).start();
     }
 
-    // 🔥 FULL SAFE PROCESSING
+    // FULL SAFE PROCESSING
     private void handleScan(List<ScanResult> raw) {
 
         List<CleanWifiResult> results = wifiScanner.process(raw);
 
         Location loc = gpsTracker.getLocation();
-        if (loc == null) return;
+        if (loc == null) return; // pas encore de fix GPS, on attend le prochain cycle
 
         long now = System.currentTimeMillis();
-
-        Set<String> batch = new HashSet<>();
 
         for (CleanWifiResult r : results) {
 
@@ -189,46 +226,44 @@ public class WifiScanService extends Service {
 
             if (r == null || r.bssid == null) continue;
 
-            batch.add(r.bssid);
-
-            Observation obs = new Observation();
-            obs.bssid = r.bssid;
-            obs.ssid = r.ssid;
-            obs.rssi = r.rssi;
-            obs.frequency = r.frequency;
-            obs.latitude = loc.getLatitude();
-            obs.longitude = loc.getLongitude();
-            obs.altitude = loc.getAltitude();
-            obs.accuracy = loc.getAccuracy();
-            obs.timestamp = now;
-
-            executor.execute(() -> {
-                db.observationDao().insert(obs);
-                updateAccessPoint(r, loc, now);
-            });
-        }
-
-        for (String bssid : batch) {
-            executor.execute(() -> trilaterationEngine.compute(bssid));
+            executor.execute(() -> processResult(r, loc, now));
         }
     }
 
-    private void sendWifiLog(CleanWifiResult r) {
-
-        Intent i = new Intent(ACTION_WIFI_LOG);
-        i.putExtra("ssid", r.ssid);
-        i.putExtra("bssid", r.bssid);
-        i.putExtra("rssi", r.rssi);
-
-        sendBroadcast(i);
-    }
-
-    private void updateAccessPoint(CleanWifiResult r, Location loc, long now) {
+    // FIX: regroupe la décision de dédoublonnage + l'écriture Observation + la mise à
+    // jour AccessPoint + le déclenchement de la trilatération dans une seule tâche
+    // séquentielle par BSSID, au lieu de l'ancien flux qui insérait une Observation
+    // inconditionnellement puis lançait la trilatération sur tout le lot.
+    private void processResult(CleanWifiResult r, Location loc, long now) {
 
         AccessPointDao dao = db.accessPointDao();
         AccessPoint ap = dao.getByBssid(r.bssid);
 
-        if (ap == null) {
+        boolean isNew = (ap == null);
+
+        if (!isNew) {
+            boolean isDuplicate = ap.lastObservationTime != 0
+                    && distanceMeters(loc.getLatitude(), loc.getLongitude(),
+                    ap.lastObsLat, ap.lastObsLon) < DEDUP_DISTANCE_METERS
+                    && (now - ap.lastObservationTime) < DEDUP_TIME_MS;
+
+            if (isDuplicate) return;
+        }
+
+        Observation obs = new Observation();
+        obs.bssid = r.bssid;
+        obs.ssid = r.ssid;
+        obs.rssi = r.rssi;
+        obs.frequency = r.frequency;
+        obs.latitude = loc.getLatitude();
+        obs.longitude = loc.getLongitude();
+        obs.altitude = loc.getAltitude();
+        obs.accuracy = loc.getAccuracy();
+        obs.timestamp = now;
+
+        db.observationDao().insert(obs);
+
+        if (isNew) {
 
             ap = new AccessPoint();
             ap.bssid = r.bssid;
@@ -242,6 +277,18 @@ public class WifiScanService extends Service {
             ap.estimatedLatitude = loc.getLatitude();
             ap.estimatedLongitude = loc.getLongitude();
             ap.estimatedRadius = 20;
+
+            // FIX: léger décalage aléatoire (~±20m) pour la position affichée, afin que
+            // des AP très proches géographiquement ne se superposent pas exactement sur
+            // la carte. Cette logique existait avant uniquement dans MapActivity (et
+            // donc jamais appliquée quand le scan venait du service) ; elle vit
+            // maintenant ici, au seul endroit où les AccessPoint sont créés.
+            ap.displayLatitude = loc.getLatitude() + (Math.random() - 0.5) * 0.0004;
+            ap.displayLongitude = loc.getLongitude() + (Math.random() - 0.5) * 0.0004;
+
+            ap.lastObsLat = loc.getLatitude();
+            ap.lastObsLon = loc.getLongitude();
+            ap.lastObservationTime = now;
 
             dao.insert(ap);
 
@@ -265,8 +312,31 @@ public class WifiScanService extends Service {
 
             ap.estimatedRadius = Math.max(5, 120 - Math.abs(ap.averageRssi));
 
+            ap.lastObsLat = loc.getLatitude();
+            ap.lastObsLon = loc.getLongitude();
+            ap.lastObservationTime = now;
+
             dao.update(ap);
         }
+
+        trilaterationEngine.compute(r.bssid);
+    }
+
+    private double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
+        if (lat2 == 0 && lon2 == 0) return Double.MAX_VALUE;
+        float[] result = new float[1];
+        Location.distanceBetween(lat1, lon1, lat2, lon2, result);
+        return result[0];
+    }
+
+    private void sendWifiLog(CleanWifiResult r) {
+
+        Intent i = new Intent(ACTION_WIFI_LOG);
+        i.putExtra("ssid", r.ssid);
+        i.putExtra("bssid", r.bssid);
+        i.putExtra("rssi", r.rssi);
+
+        sendBroadcast(i);
     }
 
     private void sendState(String state) {
@@ -279,9 +349,16 @@ public class WifiScanService extends Service {
     public void onDestroy() {
         running = false;
 
-        unregisterReceiver(scanReceiver);
+        try {
+            unregisterReceiver(scanReceiver);
+        } catch (Exception ignored) {}
+
         gpsTracker.stop();
         executor.shutdown();
+
+        if (wakeLock != null && wakeLock.isHeld()) {
+            wakeLock.release();
+        }
 
         sendState("stopped");
 

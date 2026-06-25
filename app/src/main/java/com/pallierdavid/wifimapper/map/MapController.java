@@ -8,15 +8,10 @@ import com.pallierdavid.wifimapper.data.AppDatabase;
 
 import org.osmdroid.util.GeoPoint;
 import org.osmdroid.views.MapView;
+import org.osmdroid.views.overlay.FolderOverlay;
 import org.osmdroid.views.overlay.Marker;
 import org.osmdroid.views.overlay.Polygon;
-import org.osmdroid.views.overlay.Marker;
-import android.graphics.drawable.Drawable;
-import androidx.core.content.ContextCompat;
 
-import com.google.android.gms.location.*;
-
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,8 +24,16 @@ public class MapController {
 
     private final Map<String, Marker> markerMap = new HashMap<>();
     private final Map<String, Polygon> circleMap = new HashMap<>();
-    private final List<Marker> markerLayer = new ArrayList<>();
-    private final List<Polygon> circleLayer = new ArrayList<>();
+
+    // FIX: avant, chaque mise à jour d'AP appelait refreshLayers() qui faisait
+    // mapView.getOverlays().clear() puis rajoutait TOUT (markers + cercles). Ça
+    // effaçait au passage la heatmap, la trace GPS et le marqueur utilisateur gérés
+    // par MapActivity (d'où le besoin de forceOverlayOrder() un peu partout en hack).
+    // Avec un FolderOverlay par catégorie, ajouté UNE SEULE FOIS à la carte, on peut
+    // ajouter/retirer des markers ou des cercles individuellement sans jamais toucher
+    // à la liste globale d'overlays de la MapView.
+    private final FolderOverlay circlesFolder = new FolderOverlay();
+    private final FolderOverlay markersFolder = new FolderOverlay();
 
     public MapController(Context context, MapView mapView) {
         this.context = context;
@@ -46,10 +49,16 @@ public class MapController {
 
         mapView.getOverlays().clear();
 
-        markerLayer.clear();
-        circleLayer.clear();
         markerMap.clear();
         circleMap.clear();
+        circlesFolder.getItems().clear();
+        markersFolder.getItems().clear();
+
+        // ordre d'ajout = ordre de dessin : cercles de couverture d'abord, marqueurs
+        // d'AP par dessus. Tout ce que MapActivity ajoute ENSUITE (trace GPS,
+        // marqueur utilisateur, heatmap) viendra naturellement au-dessus.
+        mapView.getOverlays().add(circlesFolder);
+        mapView.getOverlays().add(markersFolder);
     }
 
     // ---------------- LOAD AP ----------------
@@ -104,7 +113,7 @@ public class MapController {
             });
 
             markerMap.put(ap.bssid, marker);
-            markerLayer.add(marker);
+            markersFolder.getItems().add(marker);
         }
 
         marker.setPosition(point);
@@ -113,7 +122,9 @@ public class MapController {
 
         drawCoverageCircle(ap, point);
 
-        refreshLayers();
+        // FIX: un simple invalidate() suffit, plus besoin de reconstruire toute la
+        // pile d'overlays à chaque AP.
+        mapView.invalidate();
     }
 
     // ---------------- RSSI COLOR ----------------
@@ -132,9 +143,12 @@ public class MapController {
         int color = getColorFromRssi((int) ap.averageRssi);
         double radiusMeters = Math.max(10, (100 - Math.abs(ap.averageRssi)) * 2);
 
+        // FIX: on ne retouche QUE le cercle de cet AP, plus la totalité des cercles
+        // existants (l'ancienne version recalculait les 40 points trigonométriques de
+        // TOUS les cercles connus à chaque AP traité - coût O(n²) sur un scan complet).
         Polygon old = circleMap.get(ap.bssid);
         if (old != null) {
-            circleLayer.remove(old);
+            circlesFolder.getItems().remove(old);
         }
 
         Polygon circle = new Polygon(mapView);
@@ -146,20 +160,7 @@ public class MapController {
         circle.setOnClickListener((p, mv, pos) -> false);
 
         circleMap.put(ap.bssid, circle);
-        circleLayer.add(circle);
-    }
-
-    private void refreshLayers() {
-
-        mapView.getOverlays().clear();
-
-        // 1. fond (heatmap + circles)
-        mapView.getOverlays().addAll(circleLayer);
-
-        // 2. marqueurs AP
-        mapView.getOverlays().addAll(markerLayer);
-
-        mapView.invalidate();
+        circlesFolder.getItems().add(circle);
     }
 
     // ---------------- ALPHA ----------------
@@ -170,7 +171,7 @@ public class MapController {
     // ---------------- CIRCLE ----------------
     private List<GeoPoint> buildCircle(GeoPoint center, double radiusMeters) {
 
-        List<GeoPoint> points = new ArrayList<>();
+        java.util.List<GeoPoint> points = new java.util.ArrayList<>();
 
         int steps = 40;
         double earthRadius = 6371000.0;

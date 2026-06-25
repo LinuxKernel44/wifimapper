@@ -6,25 +6,21 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
 import android.graphics.drawable.Drawable;
 import android.location.Location;
 import android.net.Uri;
-import android.net.wifi.ScanResult;
-import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
-import android.widget.FrameLayout;
-import android.widget.LinearLayout;
-import android.hardware.SensorManager;
-import android.view.Gravity;
 import android.widget.ImageButton;
-import android.widget.PopupMenu;
+import android.widget.LinearLayout;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
@@ -32,14 +28,12 @@ import androidx.core.content.ContextCompat;
 
 import com.google.android.gms.location.*;
 
-import com.pallierdavid.wifimapper.data.AccessPoint;
-import com.pallierdavid.wifimapper.data.AccessPointDao;
 import com.pallierdavid.wifimapper.data.AppDatabase;
 import com.pallierdavid.wifimapper.data.GpsTrackPoint;
-import com.pallierdavid.wifimapper.data.Observation;
 import com.pallierdavid.wifimapper.map.HeatmapOverlay;
 import com.pallierdavid.wifimapper.map.MapController;
 import com.pallierdavid.wifimapper.R;
+import com.pallierdavid.wifimapper.service.WifiScanService;
 
 import org.osmdroid.config.Configuration;
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
@@ -64,30 +58,38 @@ public class MapActivity extends AppCompatActivity {
     private HeatmapOverlay heatmapOverlay;
     private boolean heatmapEnabled = false;
 
-    private WifiManager wifiManager;
+    // FIX: tout ce bloc (wifiManager, scanHandler, scanning, receiver de scan brut,
+    // handleScanResults) a été supprimé. MapActivity ne fait plus jamais sa propre
+    // boucle de scan WiFi : c'est WifiScanService, et lui seul, qui scanne, filtre
+    // (Kalman), trilatère et écrit en base - que l'app soit au premier plan ou non.
+    // Avant, les deux tournaient en parallèle sur les mêmes tables, sans coordination,
+    // avec en plus un déréférencement de `db` jamais initialisé ici (NullPointerException
+    // garantie au premier scan).
     private boolean wifiMappingMode = false;
-    private boolean scanning = false;
     private boolean receiverRegistered = false;
 
-    private Handler scanHandler = new Handler();
     private Location lastLocation;
 
-    private Button followBtn;
-    private Button homeBtn;
-    private Button scanBtn;
-    private Button heatBtn;
-
     private boolean followMe = false;
+    private boolean trackingEnabled = false;
 
     private Marker userLocationMarker;
     private float lastBearing = 0f;
     private Polyline gpsTrackLine;
     private final ArrayList<GeoPoint> gpsTrackPoints = new ArrayList<>();
     private long currentTripId = -1;
-    private boolean trackingEnabled = false;
 
     private AppDatabase db;
     private final ExecutorService dbExecutor = Executors.newSingleThreadExecutor();
+
+    private ActivityResultLauncher<String[]> wifiPermissionLauncher;
+
+    // FIX: la carte ne se rafraîchit plus une fois PAR access point reçu (ce qui, avec
+    // l'ancienne MapController.refreshLayers(), reconstruisait toute la pile
+    // d'overlays à chaque point). On regroupe les rafraîchissements : au plus un toutes
+    // les 1.5s, peu importe le nombre de broadcasts WIFI_LOG reçus entre-temps.
+    private final Handler refreshHandler = new Handler();
+    private boolean refreshPending = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -96,6 +98,8 @@ public class MapActivity extends AppCompatActivity {
         setContentView(R.layout.activity_map);
 
         Configuration.getInstance().setUserAgentValue(getPackageName());
+
+        db = AppDatabase.getInstance(this); // FIX: était jamais initialisé
 
         mapView = findViewById(R.id.map);
         ImageButton settingsBtn = findViewById(R.id.settingsBtn);
@@ -109,7 +113,6 @@ public class MapActivity extends AppCompatActivity {
         controller.loadAccessPoints();
 
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
-        wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
 
         heatmapOverlay = new HeatmapOverlay();
         heatmapEnabled = false;
@@ -117,6 +120,19 @@ public class MapActivity extends AppCompatActivity {
         gpsTrackLine = new Polyline();
         gpsTrackLine.setWidth(8f);
         mapView.getOverlays().add(gpsTrackLine);
+
+        wifiPermissionLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestMultiplePermissions(),
+                results -> {
+                    boolean granted = true;
+                    for (Boolean v : results.values()) {
+                        granted &= Boolean.TRUE.equals(v);
+                    }
+                    if (granted) {
+                        startForegroundService(new Intent(this, WifiScanService.class));
+                    }
+                }
+        );
 
         settingsBtn.setOnClickListener(v -> showBottomSheet());
 
@@ -146,8 +162,11 @@ public class MapActivity extends AppCompatActivity {
         follow.setText(followMe ? "🧭 Follow: ON" : "🧭 Follow: OFF");
         follow.setOnClickListener(v -> {
             followMe = !followMe;
-            if (followMe) startFollowMode();
-            else stopFollowMode();
+            if (followMe) {
+                startLocationUpdatesIfNeeded();
+            } else {
+                stopLocationUpdatesIfNotNeeded();
+            }
             sheet.dismiss();
         });
 
@@ -158,18 +177,11 @@ public class MapActivity extends AppCompatActivity {
             wifiMappingMode = !wifiMappingMode;
 
             if (wifiMappingMode) {
-                if (!receiverRegistered) {
-                    registerReceiver(wifiReceiver,
-                            new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
-                    receiverRegistered = true;
-                }
-                startWifiScanning();
+                registerWifiReceiverIfNeeded();
+                startWifiService();
             } else {
-                stopWifiScanning();
-                if (receiverRegistered) {
-                    unregisterReceiver(wifiReceiver);
-                    receiverRegistered = false;
-                }
+                stopService(new Intent(this, WifiScanService.class));
+                unregisterWifiReceiverIfNeeded();
             }
 
             sheet.dismiss();
@@ -212,8 +224,13 @@ public class MapActivity extends AppCompatActivity {
 
             trackingEnabled = !trackingEnabled;
 
-            if (trackingEnabled) startNewTrip();
-            else stopTrip();
+            if (trackingEnabled) {
+                startNewTrip();
+                startLocationUpdatesIfNeeded();
+            } else {
+                stopTrip();
+                stopLocationUpdatesIfNotNeeded();
+            }
 
             sheet.dismiss();
         });
@@ -243,6 +260,87 @@ public class MapActivity extends AppCompatActivity {
         }
     }
 
+    // ---------------- WIFI SERVICE START (avec vérif permissions) ----------------
+    private void startWifiService() {
+
+        List<String> perms = new ArrayList<>();
+        perms.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        perms.add(Manifest.permission.ACCESS_COARSE_LOCATION);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            perms.add(Manifest.permission.NEARBY_WIFI_DEVICES);
+            perms.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
+
+        List<String> missing = new ArrayList<>();
+        for (String p : perms) {
+            if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
+                missing.add(p);
+            }
+        }
+
+        if (!missing.isEmpty()) {
+            wifiPermissionLauncher.launch(missing.toArray(new String[0]));
+        } else {
+            startForegroundService(new Intent(this, WifiScanService.class));
+        }
+    }
+
+    // ---------------- BROADCASTS DU SERVICE ----------------
+    // FIX: remplace l'ancien wifiReceiver qui écoutait directement
+    // WifiManager.SCAN_RESULTS_AVAILABLE_ACTION et relançait tout un pipeline DB en
+    // double. Ici on se contente d'écouter ce que le service a déjà traité.
+    private final BroadcastReceiver wifiReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+
+            String action = intent.getAction();
+
+            if (WifiScanService.ACTION_WIFI_LOG.equals(action)) {
+
+                if (heatmapEnabled && lastLocation != null
+                        && mapView.getOverlays().contains(heatmapOverlay)) {
+                    heatmapOverlay.addPoint(lastLocation.getLatitude(), lastLocation.getLongitude());
+                    mapView.invalidate();
+                }
+
+                scheduleMapRefresh();
+            }
+        }
+    };
+
+    private void registerWifiReceiverIfNeeded() {
+        if (receiverRegistered) return;
+
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(WifiScanService.ACTION_WIFI_LOG);
+        filter.addAction(WifiScanService.ACTION_SCAN_STATE);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(wifiReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(wifiReceiver, filter);
+        }
+        receiverRegistered = true;
+    }
+
+    private void unregisterWifiReceiverIfNeeded() {
+        if (!receiverRegistered) return;
+        try {
+            unregisterReceiver(wifiReceiver);
+        } catch (Exception ignored) {}
+        receiverRegistered = false;
+    }
+
+    private void scheduleMapRefresh() {
+        if (refreshPending) return;
+        refreshPending = true;
+        refreshHandler.postDelayed(() -> {
+            refreshPending = false;
+            controller.loadAccessPoints();
+        }, 1500);
+    }
+
     // ---------------- BATTERY OPTIMIZATION ----------------
     private void requestBatteryOptimizationExemption() {
 
@@ -256,25 +354,17 @@ public class MapActivity extends AppCompatActivity {
                 startActivity(intent);
 
             } catch (Exception e) {
-                // fallback (si OEM bloque la popup)
                 Intent intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
                 startActivity(intent);
             }
         }
     }
 
-    private void clearHeatmap() {
-        if (heatmapOverlay != null) {
-            heatmapOverlay.clear();
-        }
-
-        if (mapView != null) {
-            mapView.getOverlays().remove(heatmapOverlay);
-            mapView.invalidate();
-        }
-    }
-
-    // ===================== 🔥 FIX Z-ORDER GLOBAL =====================
+    // ===================== FIX Z-ORDER GLOBAL =====================
+    // Conservé tel quel : reste utile pour garantir que la trace et le marqueur
+    // utilisateur restent visuellement au-dessus, même si ce n'est plus strictement
+    // nécessaire pour éviter une disparition (MapController ne touche plus à la liste
+    // globale d'overlays).
     private void forceOverlayOrder() {
 
         mapView.getOverlays().remove(gpsTrackLine);
@@ -290,17 +380,17 @@ public class MapActivity extends AppCompatActivity {
         }
     }
 
-    // ---------------- LOCATION ----------------
+    // ---------------- LOCATION : ponctuel ----------------
     private void goToMyLocationOnce() {
         if (!hasPermission()) return;
 
         fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
                 .addOnSuccessListener(location -> {
 
-                    if (location != null) {
-                        controller.centerOnUser(location.getLatitude(), location.getLongitude());
-                        mapView.getController().setZoom(18.5);
-                    }
+                    if (location == null) return;
+
+                    controller.centerOnUser(location.getLatitude(), location.getLongitude());
+                    mapView.getController().setZoom(18.5);
 
                     initUserMarker();
 
@@ -312,8 +402,15 @@ public class MapActivity extends AppCompatActivity {
                 });
     }
 
-    private void startFollowMode() {
+    // ---------------- LOCATION : continu (Follow + Track unifiés) ----------------
+    // FIX: avant, le "Track" dépendait entièrement du callback de "Follow" - activer
+    // Track sans Follow ne faisait RIEN, car le seul requestLocationUpdates() vivait
+    // dans startFollowMode(), jamais appelé par le bouton Track. Ici, un seul callback
+    // sert les deux fonctions indépendamment, démarré dès que l'une OU l'autre est
+    // active, et arrêté seulement quand aucune des deux ne l'est plus.
+    private void startLocationUpdatesIfNeeded() {
 
+        if (locationCallback != null) return; // déjà actif
         if (!hasPermission()) return;
 
         LocationRequest request = new LocationRequest.Builder(
@@ -326,28 +423,38 @@ public class MapActivity extends AppCompatActivity {
             @Override
             public void onLocationResult(@NonNull LocationResult result) {
 
-                if (!followMe || result == null) return;
-
                 Location loc = result.getLastLocation();
                 if (loc == null) return;
 
+                Location previous = lastLocation;
                 lastLocation = loc;
 
                 GeoPoint newPoint = new GeoPoint(loc.getLatitude(), loc.getLongitude());
 
                 if (userLocationMarker == null) initUserMarker();
 
+                if (previous != null) {
+                    lastBearing = computeBearing(
+                            previous.getLatitude(), previous.getLongitude(),
+                            loc.getLatitude(), loc.getLongitude());
+                    userLocationMarker.setRotation(lastBearing);
+                }
+
                 animateMarkerTo(userLocationMarker, loc.getLatitude(), loc.getLongitude());
 
-                gpsTrackPoints.add(newPoint);
-                gpsTrackLine.setPoints(new ArrayList<>(gpsTrackPoints));
+                if (trackingEnabled) {
+                    gpsTrackPoints.add(newPoint);
+                    gpsTrackLine.setPoints(new ArrayList<>(gpsTrackPoints));
+                    persistTrackPoint(loc);
+                }
 
                 forceOverlayOrder();
 
-                mapView.getController().setZoom(19.5);
-                mapView.getController().animateTo(newPoint);
-
-                controller.centerOnUser(loc.getLatitude(), loc.getLongitude());
+                if (followMe) {
+                    mapView.getController().setZoom(19.5);
+                    mapView.getController().animateTo(newPoint);
+                    controller.centerOnUser(loc.getLatitude(), loc.getLongitude());
+                }
 
                 mapView.invalidate();
             }
@@ -360,136 +467,30 @@ public class MapActivity extends AppCompatActivity {
         );
     }
 
-    private void stopFollowMode() {
+    private void stopLocationUpdatesIfNotNeeded() {
+        if (followMe || trackingEnabled) return; // encore utile pour l'autre fonction
+
         if (locationCallback != null) {
             fusedLocationClient.removeLocationUpdates(locationCallback);
+            locationCallback = null;
         }
     }
 
-    // ---------------- WIFI ----------------
-    private void startWifiScanning() {
+    private void persistTrackPoint(Location loc) {
 
-        if (!hasPermission()) return;
+        GpsTrackPoint point = new GpsTrackPoint();
+        point.tripId = currentTripId;
+        point.latitude = loc.getLatitude();
+        point.longitude = loc.getLongitude();
+        point.timestamp = System.currentTimeMillis();
+        point.accuracy = loc.getAccuracy();
+        point.speed = loc.hasSpeed() ? loc.getSpeed() : 0f;
+        point.bearing = loc.hasBearing() ? loc.getBearing() : lastBearing;
 
-        scanning = true;
-
-        scanHandler.post(new Runnable() {
-            @Override
-            public void run() {
-
-                if (!scanning) return;
-
-                wifiManager.startScan();
-                scanHandler.postDelayed(this, 3000);
-            }
-        });
+        // FIX: la table gps_track_points existait déjà mais n'était jamais alimentée -
+        // le tracé n'était gardé qu'en mémoire (ArrayList) et perdu à la fermeture.
+        dbExecutor.execute(() -> db.gpsTrackDao().insert(point));
     }
-
-    private void stopWifiScanning() {
-        scanning = false;
-    }
-
-    // ---------------- SCAN RESULTS ----------------
-    private void handleScanResults(List<ScanResult> results) {
-
-        if (lastLocation == null || results == null) return;
-
-        long now = System.currentTimeMillis();
-
-        double lat = lastLocation.getLatitude();
-        double lon = lastLocation.getLongitude();
-
-        for (ScanResult r : results) {
-
-            dbExecutor.execute(() -> {
-
-                AccessPointDao dao = db.accessPointDao();
-                AccessPoint ap = dao.getByBssid(r.BSSID);
-
-                boolean isNew = false;
-
-                if (ap == null) {
-                    ap = new AccessPoint();
-                    ap.bssid = r.BSSID;
-                    ap.ssid = r.SSID;
-                    ap.firstSeen = now;
-                    ap.observationCount = 1;
-
-                    ap.estimatedLatitude = lat;
-                    ap.estimatedLongitude = lon;
-
-                    double offsetLat = (Math.random() - 0.5) * 0.0004;
-                    double offsetLon = (Math.random() - 0.5) * 0.0004;
-
-                    ap.displayLatitude = lat + offsetLat;
-                    ap.displayLongitude = lon + offsetLon;
-
-                    isNew = true;
-                }
-
-                double lastLat = ap.lastObsLat == 0 ? lat : ap.lastObsLat;
-                double lastLon = ap.lastObsLon == 0 ? lon : ap.lastObsLon;
-
-                double dist = distanceMeters(lat, lon, lastLat, lastLon);
-                long timeDiff = now - ap.lastObservationTime;
-
-                boolean isDuplicate = !isNew && dist < 3.0 && timeDiff < 30_000;
-
-                if (isDuplicate) return;
-
-                ap.observationCount++;
-                ap.ssid = r.SSID;
-                ap.averageRssi = r.level;
-
-                ap.lastObservationTime = now;
-                ap.lastObsLat = lat;
-                ap.lastObsLon = lon;
-
-                dao.insert(ap);
-
-                Observation obs = new Observation();
-                obs.bssid = r.BSSID;
-                obs.ssid = r.SSID;
-                obs.latitude = lat;
-                obs.longitude = lon;
-
-                obs.altitude = lastLocation != null && lastLocation.hasAltitude()
-                        ? lastLocation.getAltitude()
-                        : 0;
-
-                obs.accuracy = lastLocation != null ? lastLocation.getAccuracy() : 0;
-
-                obs.rssi = r.level;
-                obs.frequency = r.frequency;
-                obs.timestamp = now;
-
-                db.observationDao().insert(obs);
-
-                AccessPoint finalAp = ap;
-
-                runOnUiThread(() ->
-                        controller.addOrUpdateMarker(finalAp)
-                );
-            });
-
-            if (heatmapEnabled && lastLocation != null && mapView.getOverlays().contains(heatmapOverlay)) {
-                heatmapOverlay.addPoint(lat, lon);
-            }
-        }
-    }
-
-    // ---------------- RECEIVER ----------------
-    private final BroadcastReceiver wifiReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-
-            if (!WifiManager.SCAN_RESULTS_AVAILABLE_ACTION.equals(intent.getAction()))
-                return;
-
-            List<ScanResult> results = wifiManager.getScanResults();
-            handleScanResults(results);
-        }
-    };
 
     // ---------------- PERMISSIONS ----------------
     private void requestLocationPermission() {
@@ -507,19 +508,6 @@ public class MapActivity extends AppCompatActivity {
                 this,
                 Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED;
-    }
-
-    private double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
-
-        float[] result = new float[1];
-
-        android.location.Location.distanceBetween(
-                lat1, lon1,
-                lat2, lon2,
-                result
-        );
-
-        return result[0];
     }
 
     private void initUserMarker() {
@@ -578,19 +566,18 @@ public class MapActivity extends AppCompatActivity {
                                  double lat2, double lon2) {
 
         float[] result = new float[2];
-
         Location.distanceBetween(lat1, lon1, lat2, lon2, result);
-
-        return result[1]; // ✔ bearing correct
+        return result[1];
     }
 
     private void startNewTrip() {
         currentTripId = System.currentTimeMillis();
-        trackingEnabled = true;
+        gpsTrackPoints.clear();
+        gpsTrackLine.setPoints(new ArrayList<>());
     }
 
     private void stopTrip() {
-        trackingEnabled = false;
+        currentTripId = -1;
     }
 
     // ---------------- LIFECYCLE ----------------
@@ -598,23 +585,40 @@ public class MapActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         mapView.onResume();
+
+        // FIX: si le service a continué à scanner pendant que cette Activity était
+        // détruite/recréée (rotation, retour depuis l'arrière-plan, etc.), on
+        // resynchronise la carte avec ce qui a été découvert entre-temps.
+        controller.loadAccessPoints();
+
+        if (wifiMappingMode) {
+            registerWifiReceiverIfNeeded();
+        }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-
         mapView.onPause();
+
+        // FIX: on NE désinscrit PLUS le receiver ni n'arrête PLUS les mises à jour de
+        // position ici. C'est tout l'intérêt du service en arrière-plan : continuer à
+        // scanner et, si un trajet est en cours d'enregistrement, continuer à
+        // persister les points GPS pendant que l'app n'est pas au premier plan. Le
+        // nettoyage définitif se fait dans onDestroy().
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+
+        unregisterWifiReceiverIfNeeded();
 
         if (locationCallback != null) {
             fusedLocationClient.removeLocationUpdates(locationCallback);
+            locationCallback = null;
         }
 
-        if (receiverRegistered) {
-            try {
-                unregisterReceiver(wifiReceiver);
-            } catch (Exception ignored) {}
-            receiverRegistered = false;
-        }
+        dbExecutor.shutdown();
     }
 }
