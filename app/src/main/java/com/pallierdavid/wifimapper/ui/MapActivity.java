@@ -16,6 +16,7 @@ import android.os.Handler;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.View;
+import android.widget.LinearLayout;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -244,18 +245,37 @@ public class MapActivity extends AppCompatActivity {
     }
 
     private MaterialButton makeSheetButton(String text) {
+
         MaterialButton btn = new MaterialButton(
-                new android.view.ContextThemeWrapper(this,
-                        com.google.android.material.R.style.Widget_Material3_Button_TextButton),
-                null, 0);
+                this,
+                null,
+                com.google.android.material.R.style.Widget_Material3_Button_OutlinedButton
+        );
+
         btn.setText(text);
-        btn.setTextSize(15f);
-        android.widget.LinearLayout.LayoutParams lp =
-                new android.widget.LinearLayout.LayoutParams(
-                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-        lp.setMargins(0, 4, 0, 4);
+        btn.setAllCaps(false);
+        btn.setCornerRadius(28);
+        btn.setStrokeWidth(2);
+
+        int primary = ContextCompat.getColor(this, R.color.primary);
+
+        btn.setStrokeColor(ContextCompat.getColorStateList(this, R.color.primary));
+        btn.setTextColor(ContextCompat.getColorStateList(this, R.color.primary));
+        btn.setRippleColor(ContextCompat.getColorStateList(this, R.color.primary));
+
+        btn.setBackgroundTintList(
+                ContextCompat.getColorStateList(this, android.R.color.transparent)
+        );
+
+        LinearLayout.LayoutParams lp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                );
+
+        lp.setMargins(0, 10, 0, 10);
         btn.setLayoutParams(lp);
+
         return btn;
     }
 
